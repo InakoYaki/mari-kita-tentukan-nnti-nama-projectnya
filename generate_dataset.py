@@ -1,5 +1,5 @@
 """
-Starter dataset generator v2 for the sensitive-data masking thesis.
+Starter dataset generator v3 (v2 + composed prompts) for the sensitive-data masking thesis.
 Standard library only. Python 3.9+.
 
 Run:  python generate_dataset.py
@@ -316,6 +316,106 @@ TEMPLATES = {
     ],
 }
 
+
+# ---- v3: composed prompts (many more contexts than the fixed templates) -------
+# Every label has cue phrases ("nik {X}", "no rek {X}", ...). Phrase pools are split
+# per label across train/dev/test, so test prompts use phrasings the model never saw.
+CUES = {
+    "NIK": {"train": ["nik {X}", "nik gue {X}", "ktp gue {X}"], "dev": ["NIK: {X}", "ktp {X}"],
+            "test": ["nomor ktp {X}", "nik saya {X}", "no. nik {X}"]},
+    "KK": {"train": ["kk {X}", "no kk {X}", "kartu keluarga {X}"], "dev": ["nomor kk: {X}", "kk gue {X}"],
+           "test": ["kk saya {X}", "no. kartu keluarga {X}"]},
+    "NPWP_NIK": {"train": ["npwp baru {X}", "npwp format baru {X}"], "dev": ["npwp terbaru {X}", "npwp baru gue {X}"],
+                 "test": ["npwp baru saya {X}", "npwp yang baru {X}"]},
+    "NPWP_15": {"train": ["npwp lama {X}", "npwp {X}"], "dev": ["npwp lama gue {X}", "no npwp {X}"],
+                "test": ["npwp lama saya {X}", "nomor npwp {X}"]},
+    "SIM_NIK": {"train": ["sim baru {X}", "nomor sim baru gue {X}"], "dev": ["sim terbaru {X}", "sim baru gue {X}"],
+                "test": ["sim baru saya {X}", "no sim baru {X}"]},
+    "SIM_LEGACY": {"train": ["sim {X}", "sim lama {X}", "nomor sim gue {X}"], "dev": ["no sim: {X}", "sim lama gue {X}"],
+                   "test": ["sim lama saya {X}", "nomor sim {X}"]},
+    "BPJS": {"train": ["bpjs {X}", "no bpjs {X}", "kartu bpjs {X}"], "dev": ["nomor bpjs kesehatan {X}", "bpjs gue {X}"],
+             "test": ["bpjs saya {X}", "no. bpjs {X}"]},
+    "STNK_SERIAL": {"train": ["nomor seri stnk {X}", "stnk {X}"], "dev": ["no seri stnk: {X}", "stnk gue {X}"],
+                    "test": ["seri stnk {X}", "stnk saya {X}"]},
+    "AKTA_LAHIR": {"train": ["akta kelahiran {X}", "no akta {X}"], "dev": ["nomor akta lahir {X}", "akta {X}"],
+                   "test": ["akta lahir anak gue {X}", "no. akta kelahiran {X}"]},
+    "PASSPORT": {"train": ["paspor {X}", "nomor paspor {X}"], "dev": ["passport no {X}", "paspor gue {X}"],
+                 "test": ["paspor saya {X}", "no paspor {X}"]},
+    "CREDIT_CARD": {"train": ["kartu kredit {X}", "cc {X}", "card number {X}"], "dev": ["kartu {X}", "my credit card {X}"],
+                    "test": ["nomor kartu kredit {X}", "my card {X}"]},
+    "BANK_ACCOUNT": {"train": ["rekening {X}", "no rek {X}", "bca {X}"], "dev": ["nomor rekening {X}", "rek gue {X}"],
+                     "test": ["rek saya {X}", "account number {X}"]},
+    "PHONE_ID": {"train": ["hp {X}", "wa {X}", "telepon {X}"], "dev": ["no hp: {X}", "nomor hp {X}"],
+                 "test": ["nomor wa gue {X}", "hubungi {X}"]},
+    "PHONE": {"train": ["call {X}", "phone {X}"], "dev": ["tel: {X}", "call me at {X}"],
+              "test": ["reach me at {X}", "phone number {X}"]},
+    "EMAIL": {"train": ["email {X}", "kirim ke {X}"], "dev": ["email: {X}", "mail {X}"],
+              "test": ["emailnya {X}", "contact me at {X}"]},
+    "IP_ADDRESS": {"train": ["ip {X}", "server {X}"], "dev": ["ip address {X}", "ip server {X}"],
+                   "test": ["host {X}", "router ip {X}"]},
+    "USERNAME": {"train": ["user {X}", "username {X}"], "dev": ["login: {X}", "user gue {X}"],
+                 "test": ["username gue {X}", "akun {X}"]},
+    "PASSWORD": {"train": ["pass {X}", "password {X}"], "dev": ["pw: {X}", "password gue {X}"],
+                 "test": ["passwordnya {X}", "pw {X}"]},
+    "API_KEY_TOKEN": {"train": ["api key {X}", "token {X}"], "dev": ["key: {X}", "my api key {X}"],
+                      "test": ["secret key {X}", "bearer token {X}"]},
+    "PERSON": {"train": ["nama gue {X}", "atas nama {X}", "pak {X}", "bu {X}"], "dev": ["namanya {X}", "mas {X}"],
+               "test": ["a.n. {X}", "mbak {X}", "{X} yang bakal dateng"]},
+    "ADDRESS_ID": {"train": ["alamat {X}", "alamat gue di {X}", "rumah gue di {X}"], "dev": ["kirim ke {X}", "alamat: {X}"],
+                   "test": ["lokasi {X}", "gue lagi di {X}"]},
+    "ADDRESS": {"train": ["address {X}", "ship to {X}"], "dev": ["lives at {X}", "my address is {X}"],
+                "test": ["deliver to {X}", "send it to {X}"]},
+    "NEG": {"train": ["nomor resi {X}", "invoice {X}", "order {X}"], "dev": ["no pesanan {X}", "no invoice {X}"],
+            "test": ["kode booking {X}", "ref {X}"]},
+}
+OPENERS = ["", "", "tolong bantuin: ", "catat ya, ", "eh ini data gue: ", "please help me with this. ", "buat formulir: "]
+CLOSERS = ["", "", " makasih", " thanks", " tolong dicek ya"]
+SEPS = [", ", ". ", "; ", " dan ", "\n"]
+PAIRS = [("NIK", "KK"), ("NPWP_15", "NPWP_NIK"), ("SIM_LEGACY", "SIM_NIK"), ("NIK", "SIM_NIK"),
+         ("BPJS", "STNK_SERIAL"), ("CREDIT_CARD", "BANK_ACCOUNT"), ("PHONE", "PHONE_ID")]  # confusable pairs, shown together
+CUE_LABELS = list(CUES)
+
+
+def _check_cue_pools_disjoint():
+    for lab, pools in CUES.items():
+        seen = {}
+        for split, phrases in pools.items():
+            for ph in phrases:
+                assert ph not in seen, f"cue phrase {ph!r} for {lab} appears in {seen[ph]} and {split}"
+                seen[ph] = split
+
+
+def _slot_for(label, rng):
+    if label == "PERSON":
+        return rng.choice(["PERSON", "PERSON_FIRST"])
+    if label == "ADDRESS_ID":
+        return rng.choice(["ADDRESS_ID", "ADDRESS_ID_INF"])
+    if label == "NEG":
+        return rng.choice(["NEG8", "NEG13", "NEG16"])
+    return label
+
+
+def _lower_static(tpl):
+    parts = re.split(r"(\{[A-Z_0-9]+\})", tpl)
+    return "".join(p if p.startswith("{") else p.lower() for p in parts)
+
+
+def compose(rng, split):
+    labels = list(rng.choice(PAIRS)) if rng.random() < 0.4 else []
+    while len(labels) < rng.randint(2, 5):
+        labels.append(rng.choice(CUE_LABELS))
+    rng.shuffle(labels)
+    body = ""
+    for i, lab in enumerate(labels):
+        clause = rng.choice(CUES[lab][split]).replace("{X}", "{" + _slot_for(lab, rng) + "}")
+        body += clause if i == 0 else rng.choice(SEPS) + clause
+    tpl = rng.choice(OPENERS) + body + rng.choice(CLOSERS)
+    style = "informal" if rng.random() < 0.6 else "formal"
+    if style == "informal" and rng.random() < 0.5:
+        tpl = _lower_static(tpl)
+    return "mix", style, tpl
+
+
 SLOT = re.compile(r"\{([A-Z_0-9]+)\}")
 
 
@@ -339,15 +439,18 @@ def fill(template, rng, split, style):
     return text, spans
 
 
-def build(split, n, rng):
+def build(split, n, rng, compose_share=0.7):
     rows = []
     for i in range(n):
-        lang, style, tpl = rng.choice(TEMPLATES[split])
+        if rng.random() < compose_share:
+            (lang, style, tpl), kind = compose(rng, split), "composed"
+        else:
+            (lang, style, tpl), kind = rng.choice(TEMPLATES[split]), "template"
         text, spans = fill(tpl, rng, split, style)
         for sp in spans:
             assert 0 <= sp["start"] < sp["end"] <= len(text)
-        rows.append({"id": f"{split}-{i:05d}", "split": split, "lang": lang,
-                     "style": style, "text": text, "spans": spans})
+        rows.append({"id": f"{split}-{i:05d}", "split": split, "lang": lang, "style": style,
+                     "kind": kind, "text": text, "spans": spans})
     return rows
 
 
@@ -355,15 +458,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--n-train", type=int, default=3000)
-    ap.add_argument("--n-dev", type=int, default=400)
-    ap.add_argument("--n-test", type=int, default=600)
+    ap.add_argument("--n-train", type=int, default=6000)
+    ap.add_argument("--n-dev", type=int, default=600)
+    ap.add_argument("--n-test", type=int, default=800)
+    ap.add_argument("--compose-share", type=float, default=0.7, help="share of composed (vs fixed-template) prompts")
     args = ap.parse_args()
+    _check_cue_pools_disjoint()
 
     os.makedirs(args.out, exist_ok=True)
     rng = random.Random(args.seed)
     for split, n in [("train", args.n_train), ("dev", args.n_dev), ("test", args.n_test)]:
-        rows = build(split, n, rng)
+        rows = build(split, n, rng, args.compose_share)
         with open(os.path.join(args.out, f"{split}.jsonl"), "w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
