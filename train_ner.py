@@ -14,8 +14,9 @@ Pipeline: JSONL char spans -> BIO tags per token (via tokenizer offsets) -> Trai
 predictions decoded back to character spans -> scored with score.py (exact + lenient).
 Only the pure functions at the top are imported lazily-safe; heavy imports are inside main().
 
-NOTE: written and unit-tested for the alignment/decoding logic; the HF Trainer part
-could not be executed in the authoring sandbox (no GPU/network). Run the smoke test first.
+v2 changes (after the first real run): the best epoch is chosen by dev F1 (not dev loss),
+the best weights are kept in memory, and no checkpoints are written during training
+(the first run spent ~25 of its 31 minutes writing 1.1 GB checkpoints to Drive).
 """
 import argparse
 import inspect
@@ -84,7 +85,7 @@ def decode(text, offsets, pred_ids, id2label):
 def main():
     import torch
     from transformers import (AutoModelForTokenClassification, AutoTokenizer,
-                              DataCollatorForTokenClassification, Trainer,
+                              DataCollatorForTokenClassification, Trainer, TrainerCallback,
                               TrainingArguments, set_seed)
     from score import print_report, score_rows
 
@@ -143,32 +144,45 @@ def main():
     model = AutoModelForTokenClassification.from_pretrained(
         args.model, num_labels=len(tags), id2label=id2label, label2id=label2id)
 
-    kw = dict(output_dir=os.path.join(args.out, "ckpt"), learning_rate=args.lr,
-              per_device_train_batch_size=args.bs, per_device_eval_batch_size=args.bs * 2,
-              num_train_epochs=args.epochs, weight_decay=0.01, save_strategy="epoch",
-              load_best_model_at_end=True, metric_for_best_model="eval_loss",
-              greater_is_better=False, save_total_limit=1, logging_steps=50,
-              report_to="none", seed=args.seed, fp16=torch.cuda.is_available())
-    params = inspect.signature(TrainingArguments.__init__).parameters
-    kw["eval_strategy" if "eval_strategy" in params else "evaluation_strategy"] = "epoch"
-
-    trainer = Trainer(model=model, args=TrainingArguments(**kw),
-                      train_dataset=DS(enc["train"][0]), eval_dataset=DS(enc["dev"][0]),
+    targs = TrainingArguments(
+        output_dir=os.path.join(args.out, "tmp"), learning_rate=args.lr,
+        per_device_train_batch_size=args.bs, per_device_eval_batch_size=args.bs * 2,
+        num_train_epochs=args.epochs, weight_decay=0.01, save_strategy="no",
+        logging_steps=50, report_to="none", seed=args.seed, fp16=torch.cuda.is_available())
+    trainer = Trainer(model=model, args=targs, train_dataset=DS(enc["train"][0]),
                       data_collator=DataCollatorForTokenClassification(tok))
-    trainer.train()
-    trainer.save_model(os.path.join(args.out, "best"))
-    tok.save_pretrained(os.path.join(args.out, "best"))
 
-    for split in ("dev", "test"):
+    def predict_split(split):
         items, offsets = enc[split]
         logits = trainer.predict(DS(items)).predictions
         logits = logits[0] if isinstance(logits, tuple) else logits
         pred_ids = logits.argmax(-1)
-        preds = []
-        for i, r in enumerate(rows[split]):
-            n = len(offsets[i])
-            preds.append({"id": r["id"],
-                          "spans": decode(r["text"], offsets[i], pred_ids[i][:n], id2label)})
+        return [{"id": r["id"],
+                 "spans": decode(r["text"], offsets[i], pred_ids[i][:len(offsets[i])], id2label)}
+                for i, r in enumerate(rows[split])]
+
+    best = {"f1": -1.0, "epoch": 0, "state": None}
+
+    class DevF1(TrainerCallback):
+        def on_epoch_end(self, targs_, state, control, **kwargs):
+            rep = score_rows(rows["dev"], predict_split("dev"))
+            f1, lf1 = rep["micro"]["exact"]["f1"], rep["micro"]["lenient"]["f1"]
+            print(f"\n[epoch {state.epoch:.0f}] dev micro F1: exact {f1:.3f} | lenient {lf1:.3f}")
+            if f1 > best["f1"]:
+                best.update(f1=f1, epoch=int(round(state.epoch)),
+                            state={k: v.detach().cpu().clone()
+                                   for k, v in trainer.model.state_dict().items()})
+
+    trainer.add_callback(DevF1())
+    trainer.train()
+    if best["state"] is not None:
+        trainer.model.load_state_dict(best["state"])
+        print(f"\nUsing best epoch {best['epoch']} (dev micro F1 exact {best['f1']:.3f})")
+    trainer.save_model(os.path.join(args.out, "best"))
+    tok.save_pretrained(os.path.join(args.out, "best"))
+
+    for split in ("dev", "test"):
+        preds = predict_split(split)
         with open(os.path.join(args.out, f"preds_{split}.jsonl"), "w", encoding="utf-8") as f:
             for p in preds:
                 f.write(json.dumps(p, ensure_ascii=False) + "\n")
